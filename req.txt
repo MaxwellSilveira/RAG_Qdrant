@@ -1,0 +1,8 @@
+tiktoken
+tqdm
+qdrant-client 
+pandas
+openai
+python-dotenv
+fastembed
+python-dotenv
