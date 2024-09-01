@@ -1,67 +1,31 @@
 import streamlit as st
 import pandas as pd
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct
 from fastembed import TextEmbedding
 import google.generativeai as genai
 import os
 import dotenv
-from tqdm import tqdm
 
-# Configurar chaves de API
+dotenv.load_dotenv() 
 apiqdrant = os.getenv('QDRANT')
 api_key_gmnini = os.getenv('GEMINI_API_KEY')
+qdrant_url = os.getenv('QDRANT_URL')
 
-# Inicializar Streamlit
 st.title('Sistema de Recuperação de Informações Jurídicas com RAG')
 
-# Carregar o arquivo CSV com os chunks
-csv_path = 'C:/Users/Maxwell/Downloads/projeto_streamlit_cade/df100.csv'
-st.write('Carregando arquivo CSV...')
-df = pd.read_csv(csv_path)
+if 'embedding_model' not in st.session_state:
+    st.session_state.embedding_model = TextEmbedding("snowflake/snowflake-arctic-embed-l")
 
-# Criar lista de documentos
-st.write('Criando lista de documentos...')
-products_listdf = [Document(page_content=row['Conteudo_Chunk'], metadata={"source": row['Nome_Arquivo']}) for _, row in tqdm(df.iterrows(), total=df.shape[0], desc="Processando documentos")]
-
-# # Limitar a quantidade de documentos para teste
-# products_listdf = products_listdf[:100]
-
-# Mostrar um exemplo de documento
-if st.checkbox('Exibir exemplo de documento'):
-    st.write(products_listdf[0].page_content)
-
-# Inicializar o modelo de embeddings Snowflake
-st.write('Gerando embeddings...')
-embedding_model = TextEmbedding("snowflake/snowflake-arctic-embed-l")
-texts = [doc.page_content for doc in products_listdf]
-embeddings = embedding_model.embed(texts)
-
-# Conectar ao Qdrant
 qdrant_client = QdrantClient(
-    url="356af5af-fd28-4b0b-a894-09c358e6b1e0.europe-west3-0.gcp.cloud.qdrant.io:6333",
+    url=qdrant_url,
     api_key=apiqdrant,
 )
-
 collection_name = "qdrantrag100"
 
-# Inserir os documentos no Qdrant
-st.write('Inserindo documentos no Qdrant...')
-points = [
-    PointStruct(
-        id=idx,
-        vector=embedding,
-        payload={"text": doc.page_content, "source": doc.metadata["source"]},
-    )
-    for idx, (embedding, doc) in enumerate(zip(embeddings, products_listdf))
-]
-qdrant_client.upsert(collection_name=collection_name, points=points)
-
-# Fazer uma query
 query = st.text_input('Digite sua query:')
 if query:
     st.write(f'Consultando Qdrant para: {query}')
-    query_embedding = embedding_model.embed([query])[0]
+    query_embedding = list(st.session_state.embedding_model.embed([query]))[0]
 
     search_results = qdrant_client.search(
         collection_name=collection_name,
@@ -75,20 +39,33 @@ if query:
         st.write(f"**Source**: {result.payload['source']}")
         st.write(f"**Text**: {result.payload['text']}\n")
 
-    # Combinar textos dos resultados
     retrieved_docs = [doc.payload['text'] for doc in search_results]
     combined_text = "\n\n".join(retrieved_docs)
 
-    # Inicializar a conversa com o modelo Gemini
-    if st.button('Iniciar Conversa com Gemini'):
+    # Iniciar o chat
+    def start_chat():
+        """Inicia um chat com o modelo Gemini, fornecendo um contexto inicial."""
         genai.configure(api_key=api_key_gmnini)
         model = genai.GenerativeModel('gemini-1.5-flash')
         conversation = model.start_chat()
-        response = conversation.send_message(f"Você é um assistente do Augmented Generation Recovery (RAG) e fará uma conversa relacionada ao que foi retornado pelo modelo do retriever. Nesse caso, você receberá os chunks com a maior similaridade com a consulta do usuário e os usará como contexto para formular respostas sobre os chunks retornados. Você receberá perguntas sobre os seguintes chunks retornados de um retriever RAG: {combined_text}. Responda as perguntas de forma clara e concisa, utilizando as informações presentes no texto. Sabendo que são documentos do CADE (Conselho Administrativo de Defesa Econômica) um orgão federal responsável por fiscalizar, então traga as respostas ao usuário trazendo um viés jurídico apenas com as informações presentes nos chunks")
 
-        st.write("Gemini:", response.text)
+        # Sys prompt
+        conversation.send_message(f"""Você é um assistente especializado em Recuperação de Informação Aumentada (RAG), focado em fornecer respostas baseadas exclusivamente no conteúdo recuperado pelo modelo retriever. Seu objetivo é utilizar os trechos de texto mais relevantes, fornecidos a partir de uma consulta do usuário, como contexto para responder de forma precisa e objetiva. Os trechos recuperados estão relacionados a documentos do Conselho Administrativo de Defesa Econômica (CADE), uma entidade federal responsável por fiscalizar práticas econômicas no Brasil. Todas as suas respostas devem ser juridicamente fundamentadas, refletindo as informações contidas nos trechos fornecidos. Por favor, evite conjecturas e responda apenas com base nas informações disponíveis nos trechos recuperados. Aqui estão os trechos recuperados para sua referência: {combined_text}                     
+        """)
 
-        user_input = st.text_input("Você:", "")
+        if 'conversation' not in st.session_state:
+            st.session_state.conversation = conversation
+
+    if st.button('Detalhamento dos termos retornados'):
+        start_chat()
+
+    if 'conversation' in st.session_state:
+        user_input = st.text_input("Digite sua pergunta:")
+        st.caption("Digite 'sair' para encerrar a sessão.")
         if user_input:
-            response = conversation.send_message(user_input)
-            st.write("Gemini:", response.text)
+            if user_input.lower() == "sair":
+                st.write("Conversa encerrada.")
+                del st.session_state.conversation 
+            else:
+                response = st.session_state.conversation.send_message(user_input)
+                st.write("Gemini:", response.text)
